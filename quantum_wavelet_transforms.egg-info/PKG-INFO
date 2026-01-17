@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: quantum-wavelet-transforms
+Version: 0.1.0
+Summary: Quantum circuit implementations of wavelet transforms
+Author: Deepak Gupta
+License-File: LICENSE
+Requires-Dist: pennylane>=0.30
+Dynamic: license-file

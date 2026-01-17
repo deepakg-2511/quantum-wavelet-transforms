@@ -1,191 +1,106 @@
-"""
-Quantum Daubechies D4 Wavelet Transform.
-
-Implements the Daubechies D4 quantum wavelet transform using
-fixed local unitaries (C0, C1) and PerfectShuffle permutations.
-"""
-
-import functools
 import numpy as np
-
-from pennylane import math
-from pennylane.capture import enabled
-from pennylane.control_flow import for_loop
-from pennylane.decomposition import add_decomps, register_resources
+import pennylane as qml
 from pennylane.operation import Operation
-from pennylane.ops import QubitUnitary
-from pennylane.wires import Wires, WiresLike
+from pennylane.wires import Wires
 
 from quantum_wavelets.permutations import PerfectShuffle
 
+# ============================================================
+# Daubechies D4 2-qubit kernel (unitary, det = +1)
+# ============================================================
 
-# ----------------------------------------------------------------------
-# Fixed Daubechies D4 kernels
-# ----------------------------------------------------------------------
+SQRT2 = np.sqrt(2)
+SQRT3 = np.sqrt(3)
 
-_sqrt3 = np.sqrt(3)
+h0 = (1 + SQRT3) / (4 * SQRT2)
+h1 = (3 + SQRT3) / (4 * SQRT2)
+h2 = (3 - SQRT3) / (4 * SQRT2)
+h3 = (1 - SQRT3) / (4 * SQRT2)
 
-_alpha = np.arccos((1 + _sqrt3) / 4)
-_beta  = np.arccos((3 + _sqrt3) / 4)
+UD4 = np.array(
+    [
+        [ h0,  h1,  h2,  h3],
+        [ h3, -h2,  h1, -h0],
+        [ h2,  h3, -h0, -h1],
+        [ h1, -h0, -h3,  h2],
+    ],
+    dtype=complex,
+)
 
-C0 = np.array([
-    [np.cos(_alpha),  np.sin(_alpha)],
-    [np.sin(_alpha), -np.cos(_alpha)]
-])
+# Sanity check (optional, safe to keep)
+# assert np.allclose(UD4.conj().T @ UD4, np.eye(4))
+# assert np.isclose(np.linalg.det(UD4), 1.0)
 
-C1 = np.array([
-    [np.cos(_beta),  np.sin(_beta)],
-    [np.sin(_beta), -np.cos(_beta)]
-])
 
+# ============================================================
+# General Daubechies D4 Transform  D_{2^n}^4
+# ============================================================
 
 class DaubechiesD4(Operation):
     r"""
-    DaubechiesD4(wires)
+    General Daubechies D4 quantum wavelet transform :math:`D_{2^n}^4`.
 
-    Apply the quantum Daubechies D4 wavelet transform on ``n`` qubits.
+    Implements the multiresolution construction of
+    Fijany & Williams (1998) using:
 
-    The transform is constructed from:
-    - fixed single-qubit unitaries C0 and C1,
-    - applied in an alternating block-diagonal pattern,
-    - interleaved with PerfectShuffle permutations.
+    - local 2-qubit Daubechies D4 kernels
+    - perfect-shuffle permutations
+    - scale reduction by keeping low-frequency wires
+
+    Works for any number of qubits n >= 2.
     """
 
+    num_params = 0
     grad_method = None
-    resource_keys = {"num_wires"}
 
-    def __init__(self, wires: WiresLike, id=None):
+    def __init__(self, wires, id=None):
         wires = Wires(wires)
-        self.hyperparameters["n_wires"] = len(wires)
+
+        if len(wires) < 2:
+            raise ValueError("DaubechiesD4 requires at least 2 qubits.")
+
         super().__init__(wires=wires, id=id)
 
-    def _flatten(self):
-        return tuple(), (self.wires, tuple())
-
-    @property
-    def num_params(self):
-        return 0
-
-    # ------------------------------------------------------------------
-    # Decomposition entry point
-    # ------------------------------------------------------------------
-    def decomposition(self):
-        return self.compute_decomposition(wires=self.wires)
-
-    # ------------------------------------------------------------------
-    # Matrix (verification only, small n)
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------
+    # Decomposition (this is the ONLY thing PennyLane needs)
+    # --------------------------------------------------------
     @staticmethod
-    @functools.lru_cache
-    def compute_matrix(n_wires):
+    def compute_decomposition(*params, wires, **kwargs):
         """
-        Construct the full Daubechies D4 matrix (for testing only).
+        Multiscale Daubechies D4 decomposition.
 
-        NOTE: This is exponential in size and should only be used
-        for small n.
+        IMPORTANT:
+        - Signature MUST accept *params and **kwargs
+        - Do NOT introduce custom hyperparameters here
         """
-        dim = 2**n_wires
-        U = np.eye(dim)
 
-        # Build matrix via circuit simulation
-        import pennylane as qml
-        dev = qml.device("default.qubit", wires=n_wires)
-
-        @qml.qnode(dev)
-        def circuit():
-            DaubechiesD4(wires=range(n_wires))
-            return qml.state()
-
-        U = qml.matrix(circuit)()
-        return U
-
-    # ------------------------------------------------------------------
-    # Gate-level decomposition
-    # ------------------------------------------------------------------
-    @staticmethod
-    def compute_decomposition(wires: WiresLike):
-        """
-        Decompose the Daubechies D4 transform into C0/C1 unitaries
-        and PerfectShuffle permutations.
-        """
         wires = Wires(wires)
-        n = len(wires)
-
         ops = []
 
-        # Number of layers = n - 1
-        for level in range(n - 1):
+        active_wires = list(wires)
 
-            # Active wires at this scale
-            active = wires[level:]
+        # Multiresolution stages
+        while len(active_wires) >= 2:
 
-            for idx, wire in enumerate(active):
-                if idx % 2 == 0:
-                    ops.append(QubitUnitary(C0, wires=[wire]))
-                else:
-                    ops.append(QubitUnitary(C1, wires=[wire]))
+            # 1. Apply D4 kernels on adjacent pairs
+            for i in range(0, len(active_wires) - 1, 2):
+                ops.append(
+                    qml.QubitUnitary(
+                        UD4,
+                        wires=[active_wires[i], active_wires[i + 1]],
+                    )
+                )
 
-            # Shuffle all wires
-            ops.append(PerfectShuffle(wires=wires))
+            # 2. Perfect shuffle permutation
+            ops.append(PerfectShuffle(wires=active_wires))
+
+            # 3. Keep low-frequency half (even indices)
+            active_wires = active_wires[::2]
 
         return ops
 
-    # ------------------------------------------------------------------
-    # qfunc decomposition (JAX / capture compatible)
-    # ------------------------------------------------------------------
-    @staticmethod
-    def compute_qfunc_decomposition(*wires, n_wires):
-        wires = math.array(wires, like="jax")
-
-        @for_loop(n_wires - 1)
-        def outer(level):
-
-            @for_loop(n_wires - level)
-            def inner(i):
-                wire = wires[level + i]
-
-                if i % 2 == 0:
-                    QubitUnitary(C0, wires=[wire])
-                else:
-                    QubitUnitary(C1, wires=[wire])
-
-            inner()
-            PerfectShuffle(wires=wires)
-
-        outer()
-
-    @property
-    def resource_params(self):
-        return {"num_wires": len(self.wires)}
-
-
-# ----------------------------------------------------------------------
-# Resource counting (coarse)
-# ----------------------------------------------------------------------
-def _d4_resources(num_wires):
-    return {
-        QubitUnitary: num_wires * (num_wires - 1),
-        PerfectShuffle: num_wires - 1,
-    }
-
-
-@register_resources(_d4_resources)
-def _d4_decomposition(wires: WiresLike, n_wires, **__):
-
-    @for_loop(n_wires - 1)
-    def outer(level):
-
-        @for_loop(n_wires - level)
-        def inner(i):
-            if i % 2 == 0:
-                QubitUnitary(C0, wires=[wires[level + i]])
-            else:
-                QubitUnitary(C1, wires=[wires[level + i]])
-
-        inner()
-        PerfectShuffle(wires=wires)
-
-    outer()
-
-
-add_decomps(DaubechiesD4, _d4_decomposition)
+    # --------------------------------------------------------
+    # Adjoint (inverse transform)
+    # --------------------------------------------------------
+    def adjoint(self):
+        return qml.adjoint(DaubechiesD4)(wires=self.wires)
