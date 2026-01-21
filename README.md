@@ -164,23 +164,4 @@ python -m pytest
 }
 ```
 
----
-
-## Roadmap
-
-Planned and potential extensions include:
-
-- Inverse quantum wavelet transforms  
-- Higher-order Daubechies wavelets (D6, D8)  
-- Wavelet packet transforms  
-- Benchmarks against QFT-based approaches  
-- Upstream contribution to PennyLane  
-
----
-
-## License
-
-Apache License 2.0
-
-
 
