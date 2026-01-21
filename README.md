@@ -182,13 +182,5 @@ Planned and potential extensions include:
 
 Apache License 2.0
 
----
 
-## After Saving
-
-```bash
-git add README.md
-git commit -m "Update README with Daubechies D4 quantum wavelet transform"
-git push
-```
 
