@@ -164,4 +164,14 @@ python -m pytest
 }
 ```
 
+## Software Environment
 
+All results in this repository were developed and tested using the following software stack:
+
+```bash
+Python        : 3.11.4
+NumPy         : 1.26.4
+PennyLane     : 0.44.0
+PyWavelets    : 1.5.0
+
+```
